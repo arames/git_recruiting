@@ -2,8 +2,9 @@
 
 To use:
 * open your terminal ("Terminal" app in MacOS),
-* copy and run `[ ! -d "git_recruiting" ] && git clone https://github.com/arames/git_recruiting.git git_recruiting`
-* run the tool: ./git_recruiting/gitcontrib.py
+* The first time you use this tool, copy and run `[ ! -d "git_recruiting" ] && git clone https://github.com/arames/git_recruiting.git git_recruiting`.
+  In the future, you can just come back to the same directory and run the tool.
+* Run the tool with `cd git_recruiting; ./gitcontrib.py`.
 
 
 An example session looks like
