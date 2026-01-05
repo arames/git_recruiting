@@ -2,7 +2,7 @@
 
 To use:
 * open your terminal ("Terminal" app in MacOS),
-* copy `[ ! -d "git_recruiting" ] &&https://github.com/arames/git_recruiting.git git_recruiting`
+* copy and run `[ ! -d "git_recruiting" ] && git clone https://github.com/arames/git_recruiting.git git_recruiting`
 * run the tool: ./git_recruiting/gitcontrib.py
 
 
