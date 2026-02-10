@@ -7,6 +7,7 @@ Analyzes git repositories and generates contributor reports with configurable fi
 import argparse
 import csv
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -17,6 +18,9 @@ from typing import List, Optional, Dict, Any, Tuple
 from urllib.parse import quote_plus, urlparse
 import hashlib
 import re
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -43,6 +47,7 @@ class AnalysisOptions:
     cache_dir: Optional[str] = None
     linkedin: bool = True
     format: str = "numbers"
+    include_line_stats: bool = False
     
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
@@ -66,9 +71,9 @@ class OptionsCache:
         try:
             with open(cache_path, 'w') as f:
                 json.dump(options.to_dict(), f, indent=2)
-            print(f"Options saved to {cache_path}")
+            logger.info(f"Options saved to {cache_path}")
         except Exception as e:
-            print(f"Warning: Could not save options cache: {e}", file=sys.stderr)
+            logger.warning(f"Could not save options cache: {e}")
     
     @classmethod
     def load(cls) -> Optional[AnalysisOptions]:
@@ -76,14 +81,14 @@ class OptionsCache:
         cache_path = Path.cwd() / cls.CACHE_FILE
         if not cache_path.exists():
             return None
-        
+
         try:
             with open(cache_path, 'r') as f:
                 data = json.load(f)
-            print(f"Loaded options from {cache_path}")
+            logger.info(f"Loaded options from {cache_path}")
             return AnalysisOptions.from_dict(data)
         except Exception as e:
-            print(f"Warning: Could not load options cache: {e}", file=sys.stderr)
+            logger.warning(f"Could not load options cache: {e}")
             return None
     
     @classmethod
@@ -146,7 +151,11 @@ class GitHubURLParser:
                 subdir = '/'.join(path_parts[4:])
         
         # Construct the clone URL
-        clone_url = f"https://github.com/{owner}/{repo}.git"
+        # Remove .git from repo name if already present to avoid .git.git
+        if repo.endswith('.git'):
+            clone_url = f"https://github.com/{owner}/{repo}"
+        else:
+            clone_url = f"https://github.com/{owner}/{repo}.git"
         
         return clone_url, branch, subdir
     
@@ -198,28 +207,28 @@ class GitAnalyzer:
             )
             return result.stdout
         except subprocess.CalledProcessError as e:
-            print(f"Error running git command: {e}", file=sys.stderr)
-            print(f"stderr: {e.stderr}", file=sys.stderr)
+            logger.error(f"Error running git command: {e}")
+            logger.error(f"stderr: {e.stderr}")
             raise
     
     def clone_or_update_repo(self, repo_url: str) -> Path:
         """Clone repository if not cached, otherwise update it."""
         cache_path = self._get_repo_cache_path(repo_url)
-        
+
         if cache_path.exists():
-            print(f"Updating cached repository at {cache_path}...")
+            logger.info(f"Updating cached repository at {cache_path}...")
             try:
                 self._run_git_command(['git', 'fetch', '--all'], cache_path)
                 self._run_git_command(['git', 'pull', '--all'], cache_path)
             except subprocess.CalledProcessError:
-                print("Update failed, repository may be corrupted. Re-cloning...")
+                logger.warning("Update failed, repository may be corrupted. Re-cloning...")
                 import shutil
                 shutil.rmtree(cache_path)
                 return self.clone_or_update_repo(repo_url)
         else:
-            print(f"Cloning repository to {cache_path}...")
+            logger.info(f"Cloning repository to {cache_path}...")
             self._run_git_command(['git', 'clone', repo_url, str(cache_path)], self.cache_dir)
-        
+
         return cache_path
     
     def analyze_contributors(
@@ -228,13 +237,14 @@ class GitAnalyzer:
         subdir: Optional[str] = None,
         since: Optional[str] = None,
         until: Optional[str] = None,
-        branch: str = "HEAD"
+        branch: str = "HEAD",
+        include_line_stats: bool = False
     ) -> List[Contributor]:
         """Analyze contributors in a repository."""
-        
+
         # Build git log command
         cmd = ['git', 'log', branch, '--no-merges', '--format=%H|%an|%ae|%at']
-        
+
         if since:
             cmd.append(f'--since={since}')
         if until:
@@ -242,20 +252,22 @@ class GitAnalyzer:
         if subdir:
             cmd.append('--')
             cmd.append(subdir)
-        
-        print(f"Analyzing commits with command: {' '.join(cmd)}")
+
+        logger.info(f"Analyzing commits with command: {' '.join(cmd)}")
         log_output = self._run_git_command(cmd, repo_path)
-        
+
+        # Count total commits for progress indication
+        commit_lines = [line for line in log_output.strip().split('\n') if line]
+        total_commits = len(commit_lines)
+        logger.info(f"Found {total_commits} commits to analyze")
+
         # Parse commits
         contributors_data: Dict[str, Dict] = {}
-        
-        for line in log_output.strip().split('\n'):
-            if not line:
-                continue
-            
+
+        for idx, line in enumerate(commit_lines, 1):
             commit_hash, name, email, timestamp = line.split('|')
             commit_date = datetime.fromtimestamp(int(timestamp))
-            
+
             key = (name, email)
             if key not in contributors_data:
                 contributors_data[key] = {
@@ -265,31 +277,68 @@ class GitAnalyzer:
                     'lines_added': 0,
                     'lines_deleted': 0
                 }
-            
+
             contributors_data[key]['commits'].append(commit_date)
-        
-        # Get line statistics for each contributor
-        for (name, email), data in contributors_data.items():
-            stats_cmd = ['git', 'log', branch, '--no-merges', '--numstat', 
-                        f'--author={email}', '--format=']
-            
-            if since:
-                stats_cmd.append(f'--since={since}')
-            if until:
-                stats_cmd.append(f'--until={until}')
-            if subdir:
-                stats_cmd.append('--')
-                stats_cmd.append(subdir)
-            
-            stats_output = self._run_git_command(stats_cmd, repo_path)
-            
-            for line in stats_output.strip().split('\n'):
-                if not line:
-                    continue
-                parts = line.split('\t')
-                if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
-                    data['lines_added'] += int(parts[0])
-                    data['lines_deleted'] += int(parts[1])
+
+            # Show progress every 100 commits or at the end
+            if idx % 100 == 0 or idx == total_commits:
+                percentage = idx * 100 // total_commits
+                # For progress updates, we need to handle carriage return for inline updates
+                # This works in terminal, GUI will need to handle it
+                msg = f"  Processed {idx}/{total_commits} commits ({percentage}%)"
+                if idx < total_commits:
+                    # Inline update - print to stdout with \r
+                    sys.stdout.write(f"\r{msg}")
+                    sys.stdout.flush()
+                else:
+                    # Final update - use logger
+                    sys.stdout.write(f"\r{msg}\n")
+                    sys.stdout.flush()
+
+        total_contributors = len(contributors_data)
+
+        # Get line statistics for each contributor (optional)
+        if include_line_stats:
+            logger.info(f"Gathering line statistics for {total_contributors} contributors...")
+
+            for idx, ((name, email), data) in enumerate(contributors_data.items(), 1):
+                stats_cmd = ['git', 'log', branch, '--no-merges', '--numstat',
+                            f'--author={email}', '--format=']
+
+                if since:
+                    stats_cmd.append(f'--since={since}')
+                if until:
+                    stats_cmd.append(f'--until={until}')
+                if subdir:
+                    stats_cmd.append('--')
+                    stats_cmd.append(subdir)
+
+                stats_output = self._run_git_command(stats_cmd, repo_path)
+
+                for line in stats_output.strip().split('\n'):
+                    if not line:
+                        continue
+                    parts = line.split('\t')
+                    if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+                        data['lines_added'] += int(parts[0])
+                        data['lines_deleted'] += int(parts[1])
+
+                # Show progress for contributors
+                is_last = idx == total_contributors
+                msg = f"  [{idx}/{total_contributors}] {name} ({len(data['commits'])} commits)"
+                if is_last:
+                    sys.stdout.write(f"\r{msg}\n")
+                    sys.stdout.flush()
+                else:
+                    sys.stdout.write(f"\r{msg}")
+                    sys.stdout.flush()
+
+            if total_contributors > 0:
+                # Final newline already added above
+                pass
+        else:
+            logger.info(f"Found {total_contributors} unique contributors (line statistics skipped)")
+
         
         # Convert to Contributor objects
         contributors = []
@@ -362,8 +411,8 @@ class ReportGenerator:
                     )
                 
                 writer.writerow(row)
-        
-        print(f"CSV report generated: {output_file}")
+
+        logger.info(f"CSV report generated: {output_file}")
     
     def generate_numbers_csv(
         self,
@@ -400,9 +449,9 @@ class ReportGenerator:
                     )
                 
                 writer.writerow(row)
-        
-        print(f"Spreadsheet-ready CSV generated: {output_file}")
-        print(f"You can open this file directly in Apple Numbers or Microsoft Excel")
+
+        logger.info(f"Spreadsheet-ready CSV generated: {output_file}")
+        logger.info(f"You can open this file directly in Apple Numbers or Microsoft Excel")
 
 
 def get_default_cache_dir() -> Path:
@@ -427,10 +476,10 @@ def interactive_mode(options: AnalysisOptions) -> AnalysisOptions:
     print("\n" + "="*60)
     print("Git Contributor Analysis - Interactive Mode")
     print("="*60)
-    
+
     if OptionsCache.exists():
         print(f"\n(Options loaded from {OptionsCache.CACHE_FILE})")
-    
+
     while True:
         print("\nCurrent Configuration:")
         print(f"  1. Repository URL: {options.repo or '(not set)'}")
@@ -441,12 +490,13 @@ def interactive_mode(options: AnalysisOptions) -> AnalysisOptions:
         print(f"  6. Output file: {options.output}")
         print(f"  7. Output format: {options.format}")
         print(f"  8. Include LinkedIn: {options.linkedin}")
-        print(f"  9. Cache directory: {options.cache_dir}")
+        print(f"  9. Include line statistics: {options.include_line_stats}")
+        print(f" 10. Cache directory: {options.cache_dir}")
         print("\n  r. Run Analysis")
         print("  s. Save options and exit")
         print("  0. Exit without saving")
-        
-        choice = input("\nSelect option (0-9, r, s): ").strip().lower()
+
+        choice = input("\nSelect option (0-10, r, s): ").strip().lower()
         
         if choice == '0':
             print("Exiting without saving...")
@@ -493,6 +543,9 @@ def interactive_mode(options: AnalysisOptions) -> AnalysisOptions:
             linkedin = input("Include LinkedIn search URLs? (y/n) [y]: ").strip().lower()
             options.linkedin = linkedin != 'n'
         elif choice == '9':
+            line_stats = input("Include line statistics? (y/n) [n]: ").strip().lower()
+            options.include_line_stats = line_stats == 'y'
+        elif choice == '10':
             options.cache_dir = input("Enter cache directory path: ").strip()
         elif choice == 'r':
             if not options.repo:
@@ -507,7 +560,28 @@ def interactive_mode(options: AnalysisOptions) -> AnalysisOptions:
     return options
 
 
+def setup_logging(level=logging.INFO):
+    """Configure logging for the application."""
+    # Create handler that outputs to stdout
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setLevel(level)
+
+    # Create formatter
+    formatter = logging.Formatter('%(message)s')
+    handler.setFormatter(formatter)
+
+    # Configure root logger
+    logger.setLevel(level)
+    logger.addHandler(handler)
+
+    # Prevent duplicate log messages
+    logger.propagate = False
+
+
 def main():
+    # Set up logging first
+    setup_logging()
+
     parser = argparse.ArgumentParser(
         description='Analyze git repository contributors and generate reports',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -543,10 +617,12 @@ Note: GitHub URLs are automatically normalized for git clone.
     parser.add_argument('--since', help='Start date (YYYY-MM-DD)')
     parser.add_argument('--until', help='End date (YYYY-MM-DD)')
     parser.add_argument('-o', '--output', help='Output file path (default: contributors.csv)')
-    parser.add_argument('--cache-dir', 
+    parser.add_argument('--cache-dir',
                        help='Cache directory for cloned repositories (default: ~/.local/share/git-contributor-analyzer)')
     parser.add_argument('--no-linkedin', dest='linkedin', action='store_false',
                        help='Exclude LinkedIn search URLs from output')
+    parser.add_argument('--line-stats', dest='include_line_stats', action='store_true',
+                       help='Include line statistics (lines added/deleted) - slower but more detailed')
     parser.add_argument('--no-interactive', dest='interactive', action='store_false', default=True,
                        help='Disable interactive mode (run directly with command-line args)')
     parser.add_argument('--format', choices=['csv', 'numbers'],
@@ -558,19 +634,19 @@ Note: GitHub URLs are automatically normalized for git clone.
     if args.repo:
         clone_url, detected_branch, detected_subdir = GitHubURLParser.normalize_git_url(args.repo)
         args.repo = clone_url
-        
+
         # Use detected branch/subdir if not explicitly provided
         if detected_branch and not args.branch:
             args.branch = detected_branch
-            print(f"Detected branch from URL: {detected_branch}")
-        
+            logger.info(f"Detected branch from URL: {detected_branch}")
+
         if detected_subdir:
             if args.subdir:
                 # Merge subdirs
                 args.subdir = f"{args.subdir}/{detected_subdir}"
             else:
                 args.subdir = detected_subdir
-            print(f"Detected subdirectory from URL: {detected_subdir}")
+            logger.info(f"Detected subdirectory from URL: {detected_subdir}")
     
     # Determine if we should use interactive mode
     use_interactive = args.interactive
@@ -607,6 +683,8 @@ Note: GitHub URLs are automatically normalized for git clone.
             options.cache_dir = args.cache_dir
         if not args.linkedin:
             options.linkedin = False
+        if args.include_line_stats:
+            options.include_line_stats = True
         if args.format:
             options.format = args.format
         
@@ -623,7 +701,8 @@ Note: GitHub URLs are automatically normalized for git clone.
             output=args.output or "contributors.csv",
             cache_dir=args.cache_dir or str(get_default_cache_dir()),
             linkedin=args.linkedin,
-            format=args.format or "numbers"
+            format=args.format or "numbers",
+            include_line_stats=args.include_line_stats
         )
     
     if not options.repo:
@@ -637,33 +716,34 @@ Note: GitHub URLs are automatically normalized for git clone.
     try:
         # Clone/update repository
         repo_path = analyzer.clone_or_update_repo(options.repo)
-        
+
         # Analyze contributors
-        print("\nAnalyzing contributors...")
+        logger.info("Analyzing contributors...")
         contributors = analyzer.analyze_contributors(
             repo_path=repo_path,
             subdir=options.subdir,
             since=options.since,
             until=options.until,
-            branch=options.branch
+            branch=options.branch,
+            include_line_stats=options.include_line_stats
         )
-        
+
         if not contributors:
-            print("No contributors found matching the criteria.")
+            logger.warning("No contributors found matching the criteria.")
             return
-        
-        print(f"\nFound {len(contributors)} contributors")
-        
+
+        logger.info(f"Found {len(contributors)} contributors")
+
         # Generate report
         output_path = Path(options.output)
-        
+
         if options.format == 'numbers':
             report_gen.generate_numbers_csv(contributors, output_path, options.linkedin)
         else:
             report_gen.generate_csv(contributors, output_path, options.linkedin)
-        
+
     except Exception as e:
-        print(f"\nError: {e}", file=sys.stderr)
+        logger.error(f"Error: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
