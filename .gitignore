@@ -1,1 +1,7 @@
 .git-contributor-options.json
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+contributors.csv

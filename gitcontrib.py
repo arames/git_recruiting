@@ -17,9 +17,7 @@ from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
 from urllib.parse import quote_plus, urlparse
 import hashlib
-import re
 
-# Set up logging
 logger = logging.getLogger(__name__)
 
 
@@ -332,10 +330,6 @@ class GitAnalyzer:
                 else:
                     sys.stdout.write(f"\r{msg}")
                     sys.stdout.flush()
-
-            if total_contributors > 0:
-                # Final newline already added above
-                pass
         else:
             logger.info(f"Found {total_contributors} unique contributors (line statistics skipped)")
 
@@ -366,21 +360,15 @@ class ReportGenerator:
     @staticmethod
     def generate_linkedin_search_url(name: str, email: str) -> str:
         """Generate a LinkedIn search URL for a contributor."""
-        # Extract company from email domain if possible
-        domain = email.split('@')[-1]
-        # company = domain.split('.')[0] if '.' in domain else domain
-        
-        # Create search query
-        query = f"{name}"
-        encoded_query = quote_plus(query)
-        
+        encoded_query = quote_plus(name)
         return f"https://www.linkedin.com/search/results/people/?keywords={encoded_query}"
     
     def generate_csv(
         self,
         contributors: List[Contributor],
         output_file: Path,
-        include_linkedin: bool = True
+        include_linkedin: bool = True,
+        format_type: str = 'csv'
     ):
         """Generate a CSV report."""
         with open(output_file, 'w', newline='', encoding='utf-8') as f:
@@ -390,10 +378,10 @@ class ReportGenerator:
             ]
             if include_linkedin:
                 fieldnames.append('LinkedIn Search')
-            
+
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
-            
+
             for contributor in contributors:
                 row = {
                     'Name': contributor.name,
@@ -404,16 +392,20 @@ class ReportGenerator:
                     'First Commit': contributor.first_commit.strftime('%Y-%m-%d'),
                     'Last Commit': contributor.last_commit.strftime('%Y-%m-%d')
                 }
-                
+
                 if include_linkedin:
                     row['LinkedIn Search'] = self.generate_linkedin_search_url(
                         contributor.name, contributor.email
                     )
-                
+
                 writer.writerow(row)
 
-        logger.info(f"CSV report generated: {output_file}")
-    
+        if format_type == 'numbers':
+            logger.info(f"Spreadsheet-ready CSV generated: {output_file}")
+            logger.info(f"You can open this file directly in Apple Numbers or Microsoft Excel")
+        else:
+            logger.info(f"CSV report generated: {output_file}")
+
     def generate_numbers_csv(
         self,
         contributors: List[Contributor],
@@ -421,53 +413,19 @@ class ReportGenerator:
         include_linkedin: bool = True
     ):
         """Generate a CSV optimized for Apple Numbers/Excel."""
-        with open(output_file, 'w', newline='', encoding='utf-8') as f:
-            fieldnames = [
-                'Name', 'Email', 'Commits', 'Lines Added', 'Lines Deleted',
-                'First Commit', 'Last Commit'
-            ]
-            if include_linkedin:
-                fieldnames.append('LinkedIn Search')
-            
-            writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter=',')
-            writer.writeheader()
-            
-            for contributor in contributors:
-                row = {
-                    'Name': contributor.name,
-                    'Email': contributor.email,
-                    'Commits': contributor.commit_count,
-                    'Lines Added': contributor.lines_added,
-                    'Lines Deleted': contributor.lines_deleted,
-                    'First Commit': contributor.first_commit.strftime('%Y-%m-%d'),
-                    'Last Commit': contributor.last_commit.strftime('%Y-%m-%d')
-                }
-                
-                if include_linkedin:
-                    row['LinkedIn Search'] = self.generate_linkedin_search_url(
-                        contributor.name, contributor.email
-                    )
-                
-                writer.writerow(row)
-
-        logger.info(f"Spreadsheet-ready CSV generated: {output_file}")
-        logger.info(f"You can open this file directly in Apple Numbers or Microsoft Excel")
+        self.generate_csv(contributors, output_file, include_linkedin, format_type='numbers')
 
 
 def get_default_cache_dir() -> Path:
     """Get the default cache directory following XDG Base Directory specification."""
-    # Check XDG_CACHE_HOME first (standard on Linux)
     xdg_cache = os.environ.get('XDG_CACHE_HOME')
     if xdg_cache:
         return Path(xdg_cache) / 'git-contributor-analyzer'
-    
-    # Fall back to ~/.local/share for persistent data (more appropriate than cache)
-    # since we want to keep repos across sessions
+
     xdg_data = os.environ.get('XDG_DATA_HOME')
     if xdg_data:
         return Path(xdg_data) / 'git-contributor-analyzer'
-    
-    # Default: ~/.local/share/git-contributor-analyzer
+
     return Path.home() / '.local' / 'share' / 'git-contributor-analyzer'
 
 
@@ -503,13 +461,13 @@ def interactive_mode(options: AnalysisOptions) -> AnalysisOptions:
             sys.exit(0)
         elif choice == 's':
             OptionsCache.save(options)
+            print("Exiting...")
+            sys.exit(0)
         elif choice == '1':
             url = input("Enter repository URL: ").strip()
-            # Parse and normalize the URL
             clone_url, branch, subdir = GitHubURLParser.normalize_git_url(url)
             options.repo = clone_url
-            
-            # Auto-fill branch and subdir if detected
+
             if branch and not options.branch:
                 print(f"  → Detected branch: {branch}")
                 options.branch = branch
@@ -562,24 +520,19 @@ def interactive_mode(options: AnalysisOptions) -> AnalysisOptions:
 
 def setup_logging(level=logging.INFO):
     """Configure logging for the application."""
-    # Create handler that outputs to stdout
     handler = logging.StreamHandler(sys.stdout)
     handler.setLevel(level)
 
-    # Create formatter
     formatter = logging.Formatter('%(message)s')
     handler.setFormatter(formatter)
 
-    # Configure root logger
     logger.setLevel(level)
     logger.addHandler(handler)
 
-    # Prevent duplicate log messages
     logger.propagate = False
 
 
 def main():
-    # Set up logging first
     setup_logging()
 
     parser = argparse.ArgumentParser(
@@ -629,44 +582,35 @@ Note: GitHub URLs are automatically normalized for git clone.
                        help='Output format (default: numbers)')
     
     args = parser.parse_args()
-    
-    # Normalize the repo URL if provided
+
     if args.repo:
         clone_url, detected_branch, detected_subdir = GitHubURLParser.normalize_git_url(args.repo)
         args.repo = clone_url
 
-        # Use detected branch/subdir if not explicitly provided
         if detected_branch and not args.branch:
             args.branch = detected_branch
             logger.info(f"Detected branch from URL: {detected_branch}")
 
         if detected_subdir:
             if args.subdir:
-                # Merge subdirs
                 args.subdir = f"{args.subdir}/{detected_subdir}"
             else:
                 args.subdir = detected_subdir
             logger.info(f"Detected subdirectory from URL: {detected_subdir}")
-    
-    # Determine if we should use interactive mode
+
     use_interactive = args.interactive
-    
-    # If no repo provided and not in non-interactive mode, force interactive
+
     if not args.repo and not use_interactive:
         parser.error("Repository URL is required in non-interactive mode")
-    
-    # Load or create options
+
     if use_interactive:
-        # Try to load cached options
         cached_options = OptionsCache.load()
         if cached_options:
             options = cached_options
         else:
             options = AnalysisOptions()
-            # Set default cache dir
             options.cache_dir = str(get_default_cache_dir())
-        
-        # Override with any command-line arguments provided
+
         if args.repo:
             options.repo = args.repo
         if args.subdir:
@@ -687,11 +631,9 @@ Note: GitHub URLs are automatically normalized for git clone.
             options.include_line_stats = True
         if args.format:
             options.format = args.format
-        
-        # Run interactive mode
+
         options = interactive_mode(options)
     else:
-        # Non-interactive mode: use command-line args only
         options = AnalysisOptions(
             repo=args.repo,
             subdir=args.subdir,
@@ -707,17 +649,14 @@ Note: GitHub URLs are automatically normalized for git clone.
     
     if not options.repo:
         parser.error("Repository URL is required")
-    
-    # Initialize
+
     cache_dir = Path(options.cache_dir)
     analyzer = GitAnalyzer(cache_dir)
     report_gen = ReportGenerator()
-    
+
     try:
-        # Clone/update repository
         repo_path = analyzer.clone_or_update_repo(options.repo)
 
-        # Analyze contributors
         logger.info("Analyzing contributors...")
         contributors = analyzer.analyze_contributors(
             repo_path=repo_path,
@@ -734,7 +673,6 @@ Note: GitHub URLs are automatically normalized for git clone.
 
         logger.info(f"Found {len(contributors)} contributors")
 
-        # Generate report
         output_path = Path(options.output)
 
         if options.format == 'numbers':
