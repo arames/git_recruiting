@@ -86,29 +86,7 @@ Or navigate to the `git_recruiting` directory in Finder and double-click `contri
 
 ### GitHub Setup (Optional)
 
-The tool works with public GitHub repositories without any setup. For private repositories or to avoid rate limits, you'll need to authenticate with GitHub.
-
-**Option 1: HTTPS with Personal Access Token (Recommended for most users)**
-
-1. Create a Personal Access Token (PAT) on GitHub:
-   - Go to GitHub Settings → Developer settings → Personal access tokens → Tokens (classic)
-   - Click "Generate new token (classic)"
-   - Give it a name (e.g., "Git Contributor Analyzer")
-   - Select scope: `repo` (for private repos) or just `public_repo` (for public repos only)
-   - Click "Generate token" and copy it
-
-2. Configure Git to use your token:
-   ```bash
-   git config --global credential.helper store
-   ```
-
-3. The first time you clone, Git will prompt for credentials:
-   - Username: your GitHub username
-   - Password: paste your Personal Access Token (not your GitHub password!)
-
-   Git will remember this for future use.
-
-**Option 2: SSH Keys (For advanced users)**
+The tool works with public GitHub repositories without any setup. For private repositories or to avoid rate limits, you'll need to authenticate with GitHub using SSH keys.
 
 1. Generate an SSH key (if you don't have one):
    ```bash
@@ -126,9 +104,8 @@ The tool works with public GitHub repositories without any setup. For private re
    ```
 
 **Troubleshooting Authentication:**
-- If you get "Authentication failed": Your token may be expired or lack the required permissions
 - If you get "Permission denied (publickey)": Your SSH key isn't properly set up
-- For organization repositories: Ensure your token has access to the organization
+- For organization repositories: Ensure your SSH key has access to the organization
 
 ## Usage
 
